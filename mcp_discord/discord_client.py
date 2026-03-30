@@ -12,18 +12,32 @@ class DiscordClient:
         self._ready = False
 
     async def start(self):
-        """Connect to Discord and wait until ready."""
+        """Connect to Discord and wait until ready.
+
+        Raises discord.LoginFailure if the token is invalid.
+        """
         import asyncio
 
         ready_event = asyncio.Event()
+        login_error: list[BaseException] = []
 
         @self.client.event
         async def on_ready():
             self._ready = True
             ready_event.set()
 
-        asyncio.create_task(self.client.start(self.token))
+        async def _run():
+            try:
+                await self.client.start(self.token)
+            except Exception as exc:
+                login_error.append(exc)
+                ready_event.set()  # unblock the wait below
+
+        asyncio.create_task(_run())
         await ready_event.wait()
+
+        if login_error:
+            raise login_error[0]
 
     async def close(self):
         await self.client.close()

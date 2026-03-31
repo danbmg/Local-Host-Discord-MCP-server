@@ -38,6 +38,7 @@ venv.bak/
 
 .env
 .env.*
+token_cache.json
 
 .vscode/
 .idea/

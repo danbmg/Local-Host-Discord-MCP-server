@@ -11,7 +11,7 @@ from functools import partial
 import msal
 
 CACHE_FILE = os.path.join(os.path.dirname(__file__), "token_cache.json")
-SCOPES = ["Tasks.ReadWrite", "offline_access"]
+SCOPES = ["Tasks.ReadWrite"]  # offline_access is added automatically by MSAL
 
 
 def get_token(client_id: str, tenant_id: str) -> str:

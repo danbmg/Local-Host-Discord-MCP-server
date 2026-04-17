@@ -1,0 +1,221 @@
+name: Daily Briefing
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  briefing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+      DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+      MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
+      MS_REFRESH_TOKEN: ${{ secrets.MS_REFRESH_TOKEN }}
+      EPITECH_ICS: ${{ secrets.EPITECH_ICS }}
+      TZ: Europe/Paris
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --no-cache-dir requests icalendar python-dateutil
+
+      - name: Run daily briefing
+        shell: python
+        run: |
+          import os, sys, io, re, json, traceback
+          from datetime import datetime, timedelta, timezone
+          from zoneinfo import ZoneInfo
+          import urllib.request
+          import requests
+          from icalendar import Calendar
+          from dateutil.rrule import rrulestr
+
+          PARIS = ZoneInfo("Europe/Paris")
+          now_local = datetime.now(PARIS)
+          today_local = now_local.date()
+          day_start = datetime.combine(today_local, datetime.min.time(), tzinfo=PARIS)
+          day_end = day_start + timedelta(days=1)
+          day_start_utc = day_start.astimezone(timezone.utc)
+          day_end_utc = day_end.astimezone(timezone.utc)
+
+          def fmt_time(dt):
+              if hasattr(dt, "astimezone"):
+                  return dt.astimezone(PARIS).strftime("%H:%M")
+              return ""
+
+          # ---------- Google Calendar ----------
+          def google_events():
+              try:
+                  r = requests.post(
+                      "https://oauth2.googleapis.com/token",
+                      data={
+                          "client_id": os.environ["GOOGLE_CLIENT_ID"],
+                          "client_secret": os.environ["GOOGLE_CLIENT_SECRET"],
+                          "refresh_token": os.environ["GOOGLE_REFRESH_TOKEN"],
+                          "grant_type": "refresh_token",
+                      },
+                      timeout=20,
+                  )
+                  r.raise_for_status()
+                  access = r.json()["access_token"]
+                  params = {
+                      "timeMin": day_start_utc.isoformat().replace("+00:00", "Z"),
+                      "timeMax": day_end_utc.isoformat().replace("+00:00", "Z"),
+                      "singleEvents": "true",
+                      "orderBy": "startTime",
+                      "maxResults": "50",
+                  }
+                  er = requests.get(
+                      "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                      headers={"Authorization": f"Bearer {access}"},
+                      params=params,
+                      timeout=20,
+                  )
+                  er.raise_for_status()
+                  items = er.json().get("items", [])
+                  out = []
+                  for e in items:
+                      summary = e.get("summary", "(no title)")
+                      start = e.get("start", {})
+                      if "dateTime" in start:
+                          dt = datetime.fromisoformat(start["dateTime"].replace("Z", "+00:00"))
+                          out.append(f"- {fmt_time(dt)} — {summary}")
+                      else:
+                          out.append(f"- (all-day) {summary}")
+                  return out or ["- (no events)"]
+              except Exception as exc:
+                  return [f"- ⚠️ Google Calendar error: {exc}"]
+
+          # ---------- Microsoft To Do ----------
+          def ms_tasks():
+              try:
+                  r = requests.post(
+                      "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+                      data={
+                          "client_id": os.environ["MS_CLIENT_ID"],
+                          "refresh_token": os.environ["MS_REFRESH_TOKEN"],
+                          "grant_type": "refresh_token",
+                          "scope": "Tasks.Read offline_access",
+                      },
+                      timeout=20,
+                  )
+                  r.raise_for_status()
+                  access = r.json()["access_token"]
+                  hdrs = {"Authorization": f"Bearer {access}"}
+                  lists = requests.get(
+                      "https://graph.microsoft.com/v1.0/me/todo/lists",
+                      headers=hdrs, timeout=20,
+                  ).json().get("value", [])
+                  out = []
+                  for lst in lists:
+                      lid, lname = lst["id"], lst.get("displayName", "")
+                      url = (
+                          f"https://graph.microsoft.com/v1.0/me/todo/lists/{lid}/tasks"
+                          "?$filter=status ne 'completed'&$top=50"
+                      )
+                      tasks = requests.get(url, headers=hdrs, timeout=20).json().get("value", [])
+                      for t in tasks:
+                          title = t.get("title", "(untitled)")
+                          due = t.get("dueDateTime")
+                          keep = False
+                          if due:
+                              try:
+                                  d = datetime.fromisoformat(
+                                      due["dateTime"].replace("Z", "+00:00")
+                                  ).astimezone(PARIS).date()
+                                  keep = d <= today_local
+                              except Exception:
+                                  keep = False
+                          else:
+                              keep = False
+                          if keep:
+                              out.append(f"- [{lname}] {title}")
+                  return out or ["- (no tasks due today)"]
+              except Exception as exc:
+                  return [f"- ⚠️ Microsoft To Do error: {exc}"]
+
+          # ---------- Epitech ICS ----------
+          def epitech_events():
+              raw = os.environ.get("EPITECH_ICS", "").strip()
+              if not raw:
+                  return ["- (EPITECH_ICS not set)"]
+              try:
+                  if raw.startswith("http://") or raw.startswith("https://"):
+                      ics_bytes = requests.get(raw, timeout=20).content
+                  else:
+                      ics_bytes = raw.encode("utf-8", errors="replace")
+                  cal = Calendar.from_ical(ics_bytes)
+                  out = []
+                  for comp in cal.walk("VEVENT"):
+                      dtstart = comp.get("dtstart")
+                      dtend = comp.get("dtend")
+                      if not dtstart:
+                          continue
+                      s = dtstart.dt
+                      e = dtend.dt if dtend else None
+                      if isinstance(s, datetime):
+                          s_local = s.astimezone(PARIS) if s.tzinfo else s.replace(tzinfo=PARIS)
+                      else:
+                          s_local = datetime.combine(s, datetime.min.time(), tzinfo=PARIS)
+                      if s_local.date() != today_local:
+                          continue
+                      summary = str(comp.get("summary", "(no title)"))
+                      location = str(comp.get("location", "")).strip()
+                      end_str = ""
+                      if isinstance(e, datetime):
+                          e_local = e.astimezone(PARIS) if e.tzinfo else e.replace(tzinfo=PARIS)
+                          end_str = f"–{e_local.strftime('%H:%M')}"
+                      loc = f" @ {location}" if location else ""
+                      out.append(f"- {s_local.strftime('%H:%M')}{end_str} — {summary}{loc}")
+                  out.sort()
+                  return out or ["- (no classes today)"]
+              except Exception as exc:
+                  return [f"- ⚠️ Epitech ICS error: {exc}"]
+
+          gcal = google_events()
+          todos = ms_tasks()
+          epi = epitech_events()
+
+          header = f"**📅 Daily Briefing — {today_local.strftime('%A %d %B %Y')}**"
+          sections = [
+              header,
+              "",
+              "**🎓 Epitech**",
+              *epi,
+              "",
+              "**🗓️ Google Calendar**",
+              *gcal,
+              "",
+              "**✅ Microsoft To Do**",
+              *todos,
+          ]
+          content = "\n".join(sections)
+          if len(content) > 1900:
+              content = content[:1900] + "\n… (truncated)"
+
+          channel = os.environ["DISCORD_CHANNEL_ID"]
+          token = os.environ["DISCORD_TOKEN"]
+          resp = requests.post(
+              f"https://discord.com/api/v10/channels/{channel}/messages",
+              headers={
+                  "Authorization": f"Bot {token}",
+                  "Content-Type": "application/json",
+                  "User-Agent": "DailyBriefingBot (github-actions, 1.0)",
+              },
+              json={"content": content},
+              timeout=20,
+          )
+          if resp.status_code >= 300:
+              print("Discord error:", resp.status_code, resp.text, file=sys.stderr)
+              sys.exit(1)
+          print("Briefing sent.")

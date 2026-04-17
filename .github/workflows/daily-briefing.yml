@@ -40,6 +40,18 @@ jobs:
           from icalendar import Calendar
           from dateutil.rrule import rrulestr
 
+          SCRIPT_VERSION = "v2-diag"
+          print(f"=== daily-briefing {SCRIPT_VERSION} ===", flush=True)
+
+          def _clean(name):
+              v = os.environ.get(name, "") or ""
+              return v.strip().strip('"').strip("'")
+
+          for k in ("GOOGLE_CLIENT_ID","GOOGLE_CLIENT_SECRET","GOOGLE_REFRESH_TOKEN",
+                   "MS_CLIENT_ID","MS_REFRESH_TOKEN","DISCORD_TOKEN","DISCORD_CHANNEL_ID"):
+              v = _clean(k)
+              print(f"env {k}: len={len(v)} set={bool(v)}", flush=True)
+
           PARIS = ZoneInfo("Europe/Paris")
           now_local = datetime.now(PARIS)
           today_local = now_local.date()
@@ -59,9 +71,9 @@ jobs:
                   r = requests.post(
                       "https://oauth2.googleapis.com/token",
                       data={
-                          "client_id": os.environ["GOOGLE_CLIENT_ID"],
-                          "client_secret": os.environ["GOOGLE_CLIENT_SECRET"],
-                          "refresh_token": os.environ["GOOGLE_REFRESH_TOKEN"],
+                          "client_id": _clean("GOOGLE_CLIENT_ID"),
+                          "client_secret": _clean("GOOGLE_CLIENT_SECRET"),
+                          "refresh_token": _clean("GOOGLE_REFRESH_TOKEN"),
                           "grant_type": "refresh_token",
                       },
                       timeout=20,
@@ -103,8 +115,8 @@ jobs:
                   r = requests.post(
                       "https://login.microsoftonline.com/common/oauth2/v2.0/token",
                       data={
-                          "client_id": os.environ["MS_CLIENT_ID"],
-                          "refresh_token": os.environ["MS_REFRESH_TOKEN"],
+                          "client_id": _clean("MS_CLIENT_ID"),
+                          "refresh_token": _clean("MS_REFRESH_TOKEN"),
                           "grant_type": "refresh_token",
                           "scope": "Tasks.Read offline_access",
                       },
@@ -205,8 +217,8 @@ jobs:
           if len(content) > 1900:
               content = content[:1900] + "\n… (truncated)"
 
-          channel = os.environ["DISCORD_CHANNEL_ID"]
-          token = os.environ["DISCORD_TOKEN"]
+          channel = _clean("DISCORD_CHANNEL_ID")
+          token = _clean("DISCORD_TOKEN")
           resp = requests.post(
               f"https://discord.com/api/v10/channels/{channel}/messages",
               headers={

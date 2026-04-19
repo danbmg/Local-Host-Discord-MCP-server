@@ -17,7 +17,6 @@ jobs:
       GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
       MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
       MS_REFRESH_TOKEN: ${{ secrets.MS_REFRESH_TOKEN }}
-      EPITECH_ICS: ${{ secrets.EPITECH_ICS }}
       TZ: Europe/Paris
 
     steps:
@@ -27,19 +26,17 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install --no-cache-dir requests icalendar python-dateutil
+        run: pip install --no-cache-dir requests
 
       - name: Run daily briefing
         shell: python
         run: |
-          import os, sys, re, json
+          import os, sys, json
           from datetime import datetime, timedelta, timezone
           from zoneinfo import ZoneInfo
           import requests
-          from icalendar import Calendar
 
-          SCRIPT_VERSION = "v4-all-tasks-grouped"
-          EPITECH_GCAL_RE = re.compile(r"^\s*G-[A-Z]{3}-\d{3}\b")
+          SCRIPT_VERSION = "v5-multi-calendars-no-ics"
           print(f"=== daily-briefing {SCRIPT_VERSION} ===", flush=True)
 
           def _clean(name):
@@ -66,7 +63,7 @@ jobs:
                   return dt.astimezone(PARIS).strftime("%H:%M")
               return ""
 
-          # ---------- Google Calendar ----------
+          # ---------- Google Calendar (all selected calendars) ----------
           def google_token():
               r = requests.post(
                   "https://oauth2.googleapis.com/token",
@@ -82,7 +79,18 @@ jobs:
                   raise RuntimeError(f"token {r.status_code}: {r.text}")
               return r.json()["access_token"]
 
-          def google_events_for(d, access):
+          def list_calendars(access):
+              r = requests.get(
+                  "https://www.googleapis.com/calendar/v3/users/me/calendarList",
+                  headers={"Authorization": f"Bearer {access}"},
+                  timeout=20,
+              )
+              r.raise_for_status()
+              items = r.json().get("items", [])
+              # Keep only calendars the user has selected (visible) in the UI
+              return [c for c in items if c.get("selected")]
+
+          def events_for_day(d, access, calendars):
               start_utc, end_utc = day_bounds_utc(d)
               params = {
                   "timeMin": start_utc.isoformat().replace("+00:00", "Z"),
@@ -91,39 +99,62 @@ jobs:
                   "orderBy": "startTime",
                   "maxResults": "50",
               }
-              er = requests.get(
-                  "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-                  headers={"Authorization": f"Bearer {access}"},
-                  params=params,
-                  timeout=20,
-              )
-              er.raise_for_status()
-              items = er.json().get("items", [])
-              out = []
-              for e in items:
-                  summary = e.get("summary", "(no title)")
-                  if EPITECH_GCAL_RE.match(summary):
+              aggregated = []
+              seen = set()
+              for cal in calendars:
+                  cal_id = cal["id"]
+                  try:
+                      er = requests.get(
+                          f"https://www.googleapis.com/calendar/v3/calendars/{cal_id}/events",
+                          headers={"Authorization": f"Bearer {access}"},
+                          params=params,
+                          timeout=20,
+                      )
+                      er.raise_for_status()
+                      items = er.json().get("items", [])
+                  except Exception as exc:
+                      print(f"  warning: calendar {cal_id} failed: {exc}", flush=True)
                       continue
+                  for e in items:
+                      # Dedupe events that appear in multiple calendars (shared)
+                      key = e.get("iCalUID") or e.get("id")
+                      if key and key in seen:
+                          continue
+                      if key:
+                          seen.add(key)
+                      aggregated.append(e)
+
+              # Sort by start time (dateTime preferred, fallback to date)
+              def sort_key(e):
+                  s = e.get("start", {})
+                  return s.get("dateTime") or s.get("date") or ""
+              aggregated.sort(key=sort_key)
+
+              out = []
+              for e in aggregated:
+                  summary = e.get("summary", "(no title)")
                   start = e.get("start", {})
                   if "dateTime" in start:
                       dt = datetime.fromisoformat(start["dateTime"].replace("Z", "+00:00"))
                       out.append(f"- {fmt_time(dt)} — {summary}")
                   else:
-                      out.append(f"- (all-day) {summary}")
-              return out or ["- (no events)"]
+                      out.append(f"- (toute la journée) {summary}")
+              return out or ["- (rien de prévu)"]
 
           def google_events_both():
               try:
                   access = google_token()
+                  cals = list_calendars(access)
+                  print(f"  {len(cals)} selected calendar(s): {[c.get('summary') for c in cals]}", flush=True)
                   return (
-                      google_events_for(today_local, access),
-                      google_events_for(tomorrow_local, access),
+                      events_for_day(today_local, access, cals),
+                      events_for_day(tomorrow_local, access, cals),
                   )
               except Exception as exc:
                   err = [f"- ⚠️ Google Calendar error: {exc}"]
                   return err, err
 
-          # ---------- Microsoft To Do (ALL incomplete tasks, grouped by list) ----------
+          # ---------- Microsoft To Do (all incomplete tasks, grouped by list) ----------
           def ms_tasks():
               try:
                   r = requests.post(
@@ -166,54 +197,7 @@ jobs:
               except Exception as exc:
                   return [f"- ⚠️ Microsoft To Do error: {exc}"]
 
-          # ---------- Epitech ICS ----------
-          def epitech_events_for(d, ics_bytes):
-              cal = Calendar.from_ical(ics_bytes)
-              out = []
-              for comp in cal.walk("VEVENT"):
-                  dtstart = comp.get("dtstart")
-                  dtend = comp.get("dtend")
-                  if not dtstart:
-                      continue
-                  s = dtstart.dt
-                  e = dtend.dt if dtend else None
-                  if isinstance(s, datetime):
-                      s_local = s.astimezone(PARIS) if s.tzinfo else s.replace(tzinfo=PARIS)
-                  else:
-                      s_local = datetime.combine(s, datetime.min.time(), tzinfo=PARIS)
-                  if s_local.date() != d:
-                      continue
-                  summary = str(comp.get("summary", "(no title)"))
-                  location = str(comp.get("location", "")).strip()
-                  end_str = ""
-                  if isinstance(e, datetime):
-                      e_local = e.astimezone(PARIS) if e.tzinfo else e.replace(tzinfo=PARIS)
-                      end_str = f"–{e_local.strftime('%H:%M')}"
-                  loc = f" @ {location}" if location else ""
-                  out.append(f"- {s_local.strftime('%H:%M')}{end_str} — {summary}{loc}")
-              out.sort()
-              return out or ["- (no classes)"]
-
-          def epitech_events_both():
-              raw = os.environ.get("EPITECH_ICS", "").strip()
-              if not raw:
-                  err = ["- (EPITECH_ICS not set)"]
-                  return err, err
-              try:
-                  if raw.startswith("http://") or raw.startswith("https://"):
-                      ics_bytes = requests.get(raw, timeout=20).content
-                  else:
-                      ics_bytes = raw.encode("utf-8", errors="replace")
-                  return (
-                      epitech_events_for(today_local, ics_bytes),
-                      epitech_events_for(tomorrow_local, ics_bytes),
-                  )
-              except Exception as exc:
-                  err = [f"- ⚠️ Epitech ICS error: {exc}"]
-                  return err, err
-
           gcal_today, gcal_tomorrow = google_events_both()
-          epi_today, epi_tomorrow = epitech_events_both()
           todos = ms_tasks()
 
           today_label = today_local.strftime('%A %d %B %Y')
@@ -223,16 +207,10 @@ jobs:
           sections = [
               header,
               "",
-              f"**🎓 Epitech — Aujourd'hui**",
-              *epi_today,
-              "",
-              f"**🎓 Epitech — Demain ({tomorrow_label})**",
-              *epi_tomorrow,
-              "",
-              f"**🗓️ Google Calendar — Aujourd'hui**",
+              f"**🗓️ Aujourd'hui**",
               *gcal_today,
               "",
-              f"**🗓️ Google Calendar — Demain**",
+              f"**🗓️ Demain ({tomorrow_label})**",
               *gcal_tomorrow,
               "",
               f"**✅ Microsoft To Do**",

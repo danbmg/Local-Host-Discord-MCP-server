@@ -40,7 +40,7 @@ jobs:
           from icalendar import Calendar
           from dateutil.rrule import rrulestr
 
-          SCRIPT_VERSION = "v2-diag-noepidup"
+          SCRIPT_VERSION = "v3-today-plus-tomorrow"
           # Events whose Google Calendar summary matches this regex are skipped in
           # the Google section because they're already covered by the Epitech ICS.
           EPITECH_GCAL_RE = re.compile(r"^\s*G-[A-Z]{3}-\d{3}\b")
@@ -58,10 +58,12 @@ jobs:
           PARIS = ZoneInfo("Europe/Paris")
           now_local = datetime.now(PARIS)
           today_local = now_local.date()
-          day_start = datetime.combine(today_local, datetime.min.time(), tzinfo=PARIS)
-          day_end = day_start + timedelta(days=1)
-          day_start_utc = day_start.astimezone(timezone.utc)
-          day_end_utc = day_end.astimezone(timezone.utc)
+          tomorrow_local = today_local + timedelta(days=1)
+
+          def day_bounds_utc(d):
+              start = datetime.combine(d, datetime.min.time(), tzinfo=PARIS)
+              end = start + timedelta(days=1)
+              return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
 
           def fmt_time(dt):
               if hasattr(dt, "astimezone"):
@@ -69,50 +71,61 @@ jobs:
               return ""
 
           # ---------- Google Calendar ----------
-          def google_events():
+          def google_token():
+              r = requests.post(
+                  "https://oauth2.googleapis.com/token",
+                  data={
+                      "client_id": _clean("GOOGLE_CLIENT_ID"),
+                      "client_secret": _clean("GOOGLE_CLIENT_SECRET"),
+                      "refresh_token": _clean("GOOGLE_REFRESH_TOKEN"),
+                      "grant_type": "refresh_token",
+                  },
+                  timeout=20,
+              )
+              if r.status_code >= 400:
+                  raise RuntimeError(f"token {r.status_code}: {r.text}")
+              return r.json()["access_token"]
+
+          def google_events_for(d, access):
+              start_utc, end_utc = day_bounds_utc(d)
+              params = {
+                  "timeMin": start_utc.isoformat().replace("+00:00", "Z"),
+                  "timeMax": end_utc.isoformat().replace("+00:00", "Z"),
+                  "singleEvents": "true",
+                  "orderBy": "startTime",
+                  "maxResults": "50",
+              }
+              er = requests.get(
+                  "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                  headers={"Authorization": f"Bearer {access}"},
+                  params=params,
+                  timeout=20,
+              )
+              er.raise_for_status()
+              items = er.json().get("items", [])
+              out = []
+              for e in items:
+                  summary = e.get("summary", "(no title)")
+                  if EPITECH_GCAL_RE.match(summary):
+                      continue
+                  start = e.get("start", {})
+                  if "dateTime" in start:
+                      dt = datetime.fromisoformat(start["dateTime"].replace("Z", "+00:00"))
+                      out.append(f"- {fmt_time(dt)} — {summary}")
+                  else:
+                      out.append(f"- (all-day) {summary}")
+              return out or ["- (no events)"]
+
+          def google_events_both():
               try:
-                  r = requests.post(
-                      "https://oauth2.googleapis.com/token",
-                      data={
-                          "client_id": _clean("GOOGLE_CLIENT_ID"),
-                          "client_secret": _clean("GOOGLE_CLIENT_SECRET"),
-                          "refresh_token": _clean("GOOGLE_REFRESH_TOKEN"),
-                          "grant_type": "refresh_token",
-                      },
-                      timeout=20,
+                  access = google_token()
+                  return (
+                      google_events_for(today_local, access),
+                      google_events_for(tomorrow_local, access),
                   )
-                  if r.status_code >= 400:
-                      raise RuntimeError(f"token {r.status_code}: {r.text}")
-                  access = r.json()["access_token"]
-                  params = {
-                      "timeMin": day_start_utc.isoformat().replace("+00:00", "Z"),
-                      "timeMax": day_end_utc.isoformat().replace("+00:00", "Z"),
-                      "singleEvents": "true",
-                      "orderBy": "startTime",
-                      "maxResults": "50",
-                  }
-                  er = requests.get(
-                      "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-                      headers={"Authorization": f"Bearer {access}"},
-                      params=params,
-                      timeout=20,
-                  )
-                  er.raise_for_status()
-                  items = er.json().get("items", [])
-                  out = []
-                  for e in items:
-                      summary = e.get("summary", "(no title)")
-                      if EPITECH_GCAL_RE.match(summary):
-                          continue
-                      start = e.get("start", {})
-                      if "dateTime" in start:
-                          dt = datetime.fromisoformat(start["dateTime"].replace("Z", "+00:00"))
-                          out.append(f"- {fmt_time(dt)} — {summary}")
-                      else:
-                          out.append(f"- (all-day) {summary}")
-                  return out or ["- (no events)"]
               except Exception as exc:
-                  return [f"- ⚠️ Google Calendar error: {exc}"]
+                  err = [f"- ⚠️ Google Calendar error: {exc}"]
+                  return err, err
 
           # ---------- Microsoft To Do ----------
           def ms_tasks():
@@ -123,7 +136,7 @@ jobs:
                           "client_id": _clean("MS_CLIENT_ID"),
                           "refresh_token": _clean("MS_REFRESH_TOKEN"),
                           "grant_type": "refresh_token",
-                          "scope": "Tasks.Read offline_access",
+                          "scope": "Tasks.ReadWrite offline_access",
                       },
                       timeout=20,
                   )
@@ -152,89 +165,123 @@ jobs:
                                   d = datetime.fromisoformat(
                                       due["dateTime"].replace("Z", "+00:00")
                                   ).astimezone(PARIS).date()
-                                  keep = d <= today_local
+                                  # Tasks due today, overdue, or due tomorrow
+                                  keep = d <= tomorrow_local
                               except Exception:
                                   keep = False
                           else:
                               keep = False
                           if keep:
                               out.append(f"- [{lname}] {title}")
-                  return out or ["- (no tasks due today)"]
+                  return out or ["- (no tasks due today or tomorrow)"]
               except Exception as exc:
                   return [f"- ⚠️ Microsoft To Do error: {exc}"]
 
           # ---------- Epitech ICS ----------
-          def epitech_events():
+          def epitech_events_for(d, ics_bytes):
+              cal = Calendar.from_ical(ics_bytes)
+              out = []
+              for comp in cal.walk("VEVENT"):
+                  dtstart = comp.get("dtstart")
+                  dtend = comp.get("dtend")
+                  if not dtstart:
+                      continue
+                  s = dtstart.dt
+                  e = dtend.dt if dtend else None
+                  if isinstance(s, datetime):
+                      s_local = s.astimezone(PARIS) if s.tzinfo else s.replace(tzinfo=PARIS)
+                  else:
+                      s_local = datetime.combine(s, datetime.min.time(), tzinfo=PARIS)
+                  if s_local.date() != d:
+                      continue
+                  summary = str(comp.get("summary", "(no title)"))
+                  location = str(comp.get("location", "")).strip()
+                  end_str = ""
+                  if isinstance(e, datetime):
+                      e_local = e.astimezone(PARIS) if e.tzinfo else e.replace(tzinfo=PARIS)
+                      end_str = f"–{e_local.strftime('%H:%M')}"
+                  loc = f" @ {location}" if location else ""
+                  out.append(f"- {s_local.strftime('%H:%M')}{end_str} — {summary}{loc}")
+              out.sort()
+              return out or ["- (no classes)"]
+
+          def epitech_events_both():
               raw = os.environ.get("EPITECH_ICS", "").strip()
               if not raw:
-                  return ["- (EPITECH_ICS not set)"]
+                  err = ["- (EPITECH_ICS not set)"]
+                  return err, err
               try:
                   if raw.startswith("http://") or raw.startswith("https://"):
                       ics_bytes = requests.get(raw, timeout=20).content
                   else:
                       ics_bytes = raw.encode("utf-8", errors="replace")
-                  cal = Calendar.from_ical(ics_bytes)
-                  out = []
-                  for comp in cal.walk("VEVENT"):
-                      dtstart = comp.get("dtstart")
-                      dtend = comp.get("dtend")
-                      if not dtstart:
-                          continue
-                      s = dtstart.dt
-                      e = dtend.dt if dtend else None
-                      if isinstance(s, datetime):
-                          s_local = s.astimezone(PARIS) if s.tzinfo else s.replace(tzinfo=PARIS)
-                      else:
-                          s_local = datetime.combine(s, datetime.min.time(), tzinfo=PARIS)
-                      if s_local.date() != today_local:
-                          continue
-                      summary = str(comp.get("summary", "(no title)"))
-                      location = str(comp.get("location", "")).strip()
-                      end_str = ""
-                      if isinstance(e, datetime):
-                          e_local = e.astimezone(PARIS) if e.tzinfo else e.replace(tzinfo=PARIS)
-                          end_str = f"–{e_local.strftime('%H:%M')}"
-                      loc = f" @ {location}" if location else ""
-                      out.append(f"- {s_local.strftime('%H:%M')}{end_str} — {summary}{loc}")
-                  out.sort()
-                  return out or ["- (no classes today)"]
+                  return (
+                      epitech_events_for(today_local, ics_bytes),
+                      epitech_events_for(tomorrow_local, ics_bytes),
+                  )
               except Exception as exc:
-                  return [f"- ⚠️ Epitech ICS error: {exc}"]
+                  err = [f"- ⚠️ Epitech ICS error: {exc}"]
+                  return err, err
 
-          gcal = google_events()
+          gcal_today, gcal_tomorrow = google_events_both()
+          epi_today, epi_tomorrow = epitech_events_both()
           todos = ms_tasks()
-          epi = epitech_events()
 
-          header = f"**📅 Daily Briefing — {today_local.strftime('%A %d %B %Y')}**"
+          today_label = today_local.strftime('%A %d %B %Y')
+          tomorrow_label = tomorrow_local.strftime('%A %d %B %Y')
+
+          header = f"**📅 Daily Briefing — {today_label}**"
           sections = [
               header,
               "",
-              "**🎓 Epitech**",
-              *epi,
+              f"**🎓 Epitech — Aujourd'hui**",
+              *epi_today,
               "",
-              "**🗓️ Google Calendar**",
-              *gcal,
+              f"**🎓 Epitech — Demain ({tomorrow_label})**",
+              *epi_tomorrow,
               "",
-              "**✅ Microsoft To Do**",
+              f"**🗓️ Google Calendar — Aujourd'hui**",
+              *gcal_today,
+              "",
+              f"**🗓️ Google Calendar — Demain**",
+              *gcal_tomorrow,
+              "",
+              f"**✅ Microsoft To Do (aujourd'hui + demain)**",
               *todos,
           ]
           content = "\n".join(sections)
-          if len(content) > 1900:
-              content = content[:1900] + "\n… (truncated)"
 
+          # ---------- Send to Discord (split into <=2000 char chunks on blank lines) ----------
           channel = _clean("DISCORD_CHANNEL_ID")
           token = _clean("DISCORD_TOKEN")
-          resp = requests.post(
-              f"https://discord.com/api/v10/channels/{channel}/messages",
-              headers={
-                  "Authorization": f"Bot {token}",
-                  "Content-Type": "application/json",
-                  "User-Agent": "DailyBriefingBot (github-actions, 1.0)",
-              },
-              json={"content": content},
-              timeout=20,
-          )
-          if resp.status_code >= 300:
-              print("Discord error:", resp.status_code, resp.text, file=sys.stderr)
-              sys.exit(1)
-          print("Briefing sent.")
+
+          def split_chunks(text, limit=1900):
+              lines = text.split("\n")
+              chunks, buf = [], []
+              size = 0
+              for line in lines:
+                  add = len(line) + 1
+                  if size + add > limit and buf:
+                      chunks.append("\n".join(buf))
+                      buf, size = [], 0
+                  buf.append(line)
+                  size += add
+              if buf:
+                  chunks.append("\n".join(buf))
+              return chunks
+
+          for i, chunk in enumerate(split_chunks(content)):
+              resp = requests.post(
+                  f"https://discord.com/api/v10/channels/{channel}/messages",
+                  headers={
+                      "Authorization": f"Bot {token}",
+                      "Content-Type": "application/json",
+                      "User-Agent": "DailyBriefingBot (github-actions, 1.0)",
+                  },
+                  json={"content": chunk},
+                  timeout=20,
+              )
+              if resp.status_code >= 300:
+                  print(f"Discord error on chunk {i}:", resp.status_code, resp.text, file=sys.stderr)
+                  sys.exit(1)
+          print(f"Briefing sent ({len(split_chunks(content))} message(s)).")

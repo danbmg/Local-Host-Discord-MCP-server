@@ -32,17 +32,13 @@ jobs:
       - name: Run daily briefing
         shell: python
         run: |
-          import os, sys, io, re, json, traceback
+          import os, sys, re, json
           from datetime import datetime, timedelta, timezone
           from zoneinfo import ZoneInfo
-          import urllib.request
           import requests
           from icalendar import Calendar
-          from dateutil.rrule import rrulestr
 
-          SCRIPT_VERSION = "v3-today-plus-tomorrow"
-          # Events whose Google Calendar summary matches this regex are skipped in
-          # the Google section because they're already covered by the Epitech ICS.
+          SCRIPT_VERSION = "v4-all-tasks-grouped"
           EPITECH_GCAL_RE = re.compile(r"^\s*G-[A-Z]{3}-\d{3}\b")
           print(f"=== daily-briefing {SCRIPT_VERSION} ===", flush=True)
 
@@ -127,7 +123,7 @@ jobs:
                   err = [f"- ⚠️ Google Calendar error: {exc}"]
                   return err, err
 
-          # ---------- Microsoft To Do ----------
+          # ---------- Microsoft To Do (ALL incomplete tasks, grouped by list) ----------
           def ms_tasks():
               try:
                   r = requests.post(
@@ -150,30 +146,23 @@ jobs:
                   ).json().get("value", [])
                   out = []
                   for lst in lists:
-                      lid, lname = lst["id"], lst.get("displayName", "")
+                      lid = lst["id"]
+                      lname = lst.get("displayName", "") or "(unnamed)"
                       url = (
                           f"https://graph.microsoft.com/v1.0/me/todo/lists/{lid}/tasks"
-                          "?$filter=status ne 'completed'&$top=50"
+                          "?$filter=status ne 'completed'&$top=100"
                       )
                       tasks = requests.get(url, headers=hdrs, timeout=20).json().get("value", [])
+                      if not tasks:
+                          continue
+                      if out:
+                          out.append("")
+                      out.append(f"**{lname}**")
                       for t in tasks:
                           title = t.get("title", "(untitled)")
-                          due = t.get("dueDateTime")
-                          keep = False
-                          if due:
-                              try:
-                                  d = datetime.fromisoformat(
-                                      due["dateTime"].replace("Z", "+00:00")
-                                  ).astimezone(PARIS).date()
-                                  # Tasks due today, overdue, or due tomorrow
-                                  keep = d <= tomorrow_local
-                              except Exception:
-                                  keep = False
-                          else:
-                              keep = False
-                          if keep:
-                              out.append(f"- [{lname}] {title}")
-                  return out or ["- (no tasks due today or tomorrow)"]
+                          star = "⭐ " if t.get("importance") == "high" else ""
+                          out.append(f"- {star}{title}")
+                  return out or ["- (no tasks)"]
               except Exception as exc:
                   return [f"- ⚠️ Microsoft To Do error: {exc}"]
 
@@ -246,19 +235,18 @@ jobs:
               f"**🗓️ Google Calendar — Demain**",
               *gcal_tomorrow,
               "",
-              f"**✅ Microsoft To Do (aujourd'hui + demain)**",
+              f"**✅ Microsoft To Do**",
               *todos,
           ]
           content = "\n".join(sections)
 
-          # ---------- Send to Discord (split into <=2000 char chunks on blank lines) ----------
+          # ---------- Send to Discord (split into <=1900 char chunks) ----------
           channel = _clean("DISCORD_CHANNEL_ID")
           token = _clean("DISCORD_TOKEN")
 
           def split_chunks(text, limit=1900):
               lines = text.split("\n")
-              chunks, buf = [], []
-              size = 0
+              chunks, buf, size = [], [], 0
               for line in lines:
                   add = len(line) + 1
                   if size + add > limit and buf:
@@ -270,7 +258,8 @@ jobs:
                   chunks.append("\n".join(buf))
               return chunks
 
-          for i, chunk in enumerate(split_chunks(content)):
+          pieces = split_chunks(content)
+          for i, chunk in enumerate(pieces):
               resp = requests.post(
                   f"https://discord.com/api/v10/channels/{channel}/messages",
                   headers={
@@ -282,6 +271,6 @@ jobs:
                   timeout=20,
               )
               if resp.status_code >= 300:
-                  print(f"Discord error on chunk {i}:", resp.status_code, resp.text, file=sys.stderr)
+                  print(f"Discord error chunk {i}:", resp.status_code, resp.text, file=sys.stderr)
                   sys.exit(1)
-          print(f"Briefing sent ({len(split_chunks(content))} message(s)).")
+          print(f"Briefing sent ({len(pieces)} message(s)).")

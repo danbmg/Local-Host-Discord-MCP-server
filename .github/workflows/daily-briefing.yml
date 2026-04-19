@@ -40,7 +40,10 @@ jobs:
           from icalendar import Calendar
           from dateutil.rrule import rrulestr
 
-          SCRIPT_VERSION = "v2-diag"
+          SCRIPT_VERSION = "v2-diag-noepidup"
+          # Events whose Google Calendar summary matches this regex are skipped in
+          # the Google section because they're already covered by the Epitech ICS.
+          EPITECH_GCAL_RE = re.compile(r"^\s*G-[A-Z]{3}-\d{3}\b")
           print(f"=== daily-briefing {SCRIPT_VERSION} ===", flush=True)
 
           def _clean(name):
@@ -99,6 +102,8 @@ jobs:
                   out = []
                   for e in items:
                       summary = e.get("summary", "(no title)")
+                      if EPITECH_GCAL_RE.match(summary):
+                          continue
                       start = e.get("start", {})
                       if "dateTime" in start:
                           dt = datetime.fromisoformat(start["dateTime"].replace("Z", "+00:00"))

@@ -1,12 +1,22 @@
 name: Daily Briefing
 
 on:
-  # GitHub Actions cron is always UTC. Paris = UTC+2 (summer) or UTC+1 (winter),
-  # so to hit 08:00 Paris year-round we fire at both 06:00 UTC and 07:00 UTC,
-  # and the script self-gates on the local Paris hour.
+  # GitHub Actions cron is always UTC and its scheduler routinely delays top-of-hour
+  # jobs by 30-120 min. To maximise the chance of firing near 08:00 Paris year-round
+  # (CEST=UTC+2, CET=UTC+1), we fire every 15 min between 05:30 UTC and 07:45 UTC,
+  # and the script uses Discord history idempotency so only the first run of the day
+  # actually posts.
   schedule:
-    - cron: "0 6 * * *"   # 08:00 Paris (CEST, late March - late October)
-    - cron: "0 7 * * *"   # 08:00 Paris (CET, late October - late March)
+    - cron: "30 5 * * *"   # 07:30 Paris CEST / 06:30 Paris CET
+    - cron: "45 5 * * *"
+    - cron: "0 6 * * *"    # 08:00 Paris CEST / 07:00 Paris CET
+    - cron: "15 6 * * *"
+    - cron: "30 6 * * *"
+    - cron: "45 6 * * *"
+    - cron: "0 7 * * *"    # 09:00 Paris CEST / 08:00 Paris CET
+    - cron: "15 7 * * *"
+    - cron: "30 7 * * *"
+    - cron: "45 7 * * *"
   workflow_dispatch:
 
 jobs:
@@ -40,31 +50,60 @@ jobs:
           from zoneinfo import ZoneInfo
           import requests
 
-          SCRIPT_VERSION = "v6-dst-safe-guard"
+          SCRIPT_VERSION = "v7-idempotent-discord-history"
           print(f"=== daily-briefing {SCRIPT_VERSION} ===", flush=True)
 
-          # Only emit on scheduled runs if the Paris local hour is exactly 8.
-          # Manual workflow_dispatch runs always emit (bypass the guard).
           PARIS = ZoneInfo("Europe/Paris")
           now_local = datetime.now(PARIS)
           event = os.environ.get("GITHUB_EVENT_NAME", "")
           print(f"event={event} paris_now={now_local.isoformat(timespec='minutes')}", flush=True)
-          if event == "schedule" and now_local.hour != 8:
-              print(f"Skipping: scheduled run at Paris hour {now_local.hour}, "
-                    f"only emit when hour == 8.")
-              sys.exit(0)
 
           def _clean(name):
               v = os.environ.get(name, "") or ""
               return v.strip().strip('"').strip("'")
 
+          today_local = now_local.date()
+          tomorrow_local = today_local + timedelta(days=1)
+          today_label = today_local.strftime('%A %d %B %Y')
+          tomorrow_label = tomorrow_local.strftime('%A %d %B %Y')
+
+          # Idempotency: on a scheduled run, skip if a briefing with today's
+          # Paris date header is already in the Discord channel. Manual
+          # workflow_dispatch runs bypass this guard so they always post.
+          HEADER_MARKER = f"Daily Briefing — {today_label}"
+
+          def already_sent_today():
+              try:
+                  ch = _clean("DISCORD_CHANNEL_ID")
+                  tk = _clean("DISCORD_TOKEN")
+                  r = requests.get(
+                      f"https://discord.com/api/v10/channels/{ch}/messages?limit=20",
+                      headers={
+                          "Authorization": f"Bot {tk}",
+                          "User-Agent": "DailyBriefingBot (github-actions, 1.0)",
+                      },
+                      timeout=20,
+                  )
+                  if r.status_code >= 300:
+                      print(f"  warning: Discord history check failed "
+                            f"{r.status_code}: {r.text[:200]}", flush=True)
+                      return False
+                  for m in r.json():
+                      if HEADER_MARKER in (m.get("content") or ""):
+                          return True
+                  return False
+              except Exception as exc:
+                  print(f"  warning: idempotency check errored: {exc}", flush=True)
+                  return False
+
+          if event == "schedule" and already_sent_today():
+              print(f"Skipping: briefing for {today_local.isoformat()} already posted.")
+              sys.exit(0)
+
           for k in ("GOOGLE_CLIENT_ID","GOOGLE_CLIENT_SECRET","GOOGLE_REFRESH_TOKEN",
                    "MS_CLIENT_ID","MS_REFRESH_TOKEN","DISCORD_TOKEN","DISCORD_CHANNEL_ID"):
               v = _clean(k)
               print(f"env {k}: len={len(v)} set={bool(v)}", flush=True)
-
-          today_local = now_local.date()
-          tomorrow_local = today_local + timedelta(days=1)
 
           def day_bounds_utc(d):
               start = datetime.combine(d, datetime.min.time(), tzinfo=PARIS)
@@ -212,9 +251,6 @@ jobs:
 
           gcal_today, gcal_tomorrow = google_events_both()
           todos = ms_tasks()
-
-          today_label = today_local.strftime('%A %d %B %Y')
-          tomorrow_label = tomorrow_local.strftime('%A %d %B %Y')
 
           header = f"**📅 Daily Briefing — {today_label}**"
           sections = [

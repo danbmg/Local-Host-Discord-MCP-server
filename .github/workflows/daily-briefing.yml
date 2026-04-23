@@ -2,21 +2,21 @@ name: Daily Briefing
 
 on:
   # GitHub Actions cron is always UTC and its scheduler routinely delays top-of-hour
-  # jobs by 30-120 min. To maximise the chance of firing near 08:00 Paris year-round
-  # (CEST=UTC+2, CET=UTC+1), we fire every 15 min between 05:30 UTC and 07:45 UTC,
+  # jobs by 30-120 min. To maximise the chance of firing near 06:00 Paris year-round
+  # (CEST=UTC+2, CET=UTC+1), we fire every 15 min between 03:30 UTC and 05:45 UTC,
   # and the script uses Discord history idempotency so only the first run of the day
   # actually posts.
   schedule:
-    - cron: "30 5 * * *"   # 07:30 Paris CEST / 06:30 Paris CET
+    - cron: "30 3 * * *"   # 05:30 Paris CEST / 04:30 Paris CET
+    - cron: "45 3 * * *"
+    - cron: "0 4 * * *"    # 06:00 Paris CEST / 05:00 Paris CET
+    - cron: "15 4 * * *"
+    - cron: "30 4 * * *"
+    - cron: "45 4 * * *"
+    - cron: "0 5 * * *"    # 07:00 Paris CEST / 06:00 Paris CET
+    - cron: "15 5 * * *"
+    - cron: "30 5 * * *"
     - cron: "45 5 * * *"
-    - cron: "0 6 * * *"    # 08:00 Paris CEST / 07:00 Paris CET
-    - cron: "15 6 * * *"
-    - cron: "30 6 * * *"
-    - cron: "45 6 * * *"
-    - cron: "0 7 * * *"    # 09:00 Paris CEST / 08:00 Paris CET
-    - cron: "15 7 * * *"
-    - cron: "30 7 * * *"
-    - cron: "45 7 * * *"
   workflow_dispatch:
 
 jobs:

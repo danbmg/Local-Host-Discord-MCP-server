@@ -7,6 +7,19 @@ on:
     - cron: "30 6 * * 4"   # 08:30 Paris CEST (été)
     - cron: "30 7 * * 4"   # 08:30 Paris CET (hiver)
   workflow_dispatch:
+    inputs:
+      otter_title:
+        description: "Titre de la réunion Otter (optionnel)"
+        required: false
+        type: string
+      otter_summary:
+        description: "Résumé Otter à mettre dans Jira (optionnel)"
+        required: false
+        type: string
+      otter_url:
+        description: "Lien du transcript Otter (optionnel)"
+        required: false
+        type: string
 
 jobs:
   sync:
@@ -42,13 +55,19 @@ jobs:
           import requests
           from requests_toolbelt.multipart.encoder import MultipartEncoder
 
-          SCRIPT_VERSION = "v4-no-paid-otter-api"
+          SCRIPT_VERSION = "v5-manual-otter-inputs"
           print(f"=== wednesday-recap-jira {SCRIPT_VERSION} ===", flush=True)
 
           PARIS = ZoneInfo("Europe/Paris")
           now = datetime.now(PARIS)
           event = os.environ.get("GITHUB_EVENT_NAME", "")
           print(f"event={event} paris_now={now.isoformat(timespec='minutes')}", flush=True)
+
+          github_event = {}
+          event_path = os.environ.get("GITHUB_EVENT_PATH", "")
+          if event_path:
+              with open(event_path, "r", encoding="utf-8") as f:
+                  github_event = json.load(f)
 
           def clean(name):
               v = os.environ.get(name, "") or ""
@@ -118,8 +137,18 @@ jobs:
           title_otter = "—"
           duration_s = 0
           otter_error = ""
+          manual_inputs = github_event.get("inputs", {}) if event == "workflow_dispatch" else {}
+          manual_summary = (manual_inputs.get("otter_summary") or "").strip()
+          manual_title = (manual_inputs.get("otter_title") or "").strip()
+          manual_url = (manual_inputs.get("otter_url") or "").strip()
 
-          if OTTER_API_KEY:
+          if manual_summary:
+              candidate = {"source": "manual"}
+              title_otter = manual_title or "Résumé Otter fourni manuellement"
+              summary_text = manual_summary
+              transcript_url = manual_url
+              print("Résumé Otter fourni via workflow_dispatch inputs.", flush=True)
+          elif OTTER_API_KEY:
               print("Otter public API: utilisation de OTTER_API_KEY", flush=True)
               otter_base = "https://api.otter.ai/v1"
               otter_headers = {"Authorization": f"Bearer {OTTER_API_KEY}"}

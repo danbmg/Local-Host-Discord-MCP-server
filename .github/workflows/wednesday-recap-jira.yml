@@ -42,7 +42,7 @@ jobs:
           import requests
           from requests_toolbelt.multipart.encoder import MultipartEncoder
 
-          SCRIPT_VERSION = "v3-otter-public-api"
+          SCRIPT_VERSION = "v4-no-paid-otter-api"
           print(f"=== wednesday-recap-jira {SCRIPT_VERSION} ===", flush=True)
 
           PARIS = ZoneInfo("Europe/Paris")
@@ -117,6 +117,7 @@ jobs:
           transcript_url = ""
           title_otter = "—"
           duration_s = 0
+          otter_error = ""
 
           if OTTER_API_KEY:
               print("Otter public API: utilisation de OTTER_API_KEY", flush=True)
@@ -173,41 +174,40 @@ jobs:
 
               r = session.get(API + "login", params={"username": OTTER_EMAIL}, timeout=20)
               if r.status_code != 200:
-                  print(
-                      "Otter legacy login failed: "
-                      f"{r.status_code} {r.text[:200]}. "
-                      "Crée un secret OTTER_API_KEY pour utiliser l'API publique Otter.",
-                      file=sys.stderr,
+                  otter_error = (
+                      "Impossible de récupérer automatiquement le transcript Otter avec le login "
+                      f"email/mot de passe legacy. Réponse Otter: {r.status_code} {r.text[:200]}"
                   )
-                  sys.exit(1)
-              userid = r.json()["userid"]
-              print(f"Otter login OK (userid={userid})", flush=True)
+                  print(f"Otter legacy login failed, création d'un ticket de suivi: {otter_error}", flush=True)
+              else:
+                  userid = r.json()["userid"]
+                  print(f"Otter login OK (userid={userid})", flush=True)
 
-              # ── Otter : liste des transcripts legacy ─────────────────────────
-              r = session.get(API + "speeches", params={
-                  "userid": userid, "folder": 0, "page_size": 50, "source": "owned"
-              }, timeout=20)
-              r.raise_for_status()
-              speeches = r.json().get("data", {}).get("speeches", [])
+                  # ── Otter : liste des transcripts legacy ─────────────────────
+                  r = session.get(API + "speeches", params={
+                      "userid": userid, "folder": 0, "page_size": 50, "source": "owned"
+                  }, timeout=20)
+                  r.raise_for_status()
+                  speeches = r.json().get("data", {}).get("speeches", [])
 
-              for s in speeches:
-                  created = s.get("created_at", 0)
-                  if wed_start <= created < wed_end:
-                      candidate = s
-                      break  # le plus récent en premier
+                  for s in speeches:
+                      created = s.get("created_at", 0)
+                      if wed_start <= created < wed_end:
+                          candidate = s
+                          break  # le plus récent en premier
 
-              if candidate:
-                  otid          = candidate.get("otid", "")
-                  title_otter   = candidate.get("title") or "Sans titre"
-                  duration_s    = candidate.get("duration", 0)
-                  summary_text  = candidate.get("summary") or "Pas de résumé disponible."
-                  transcript_url = f"https://otter.ai/u/{otid}"
-                  print(f"Transcript trouvé : '{title_otter}' (otid={otid})", flush=True)
+                  if candidate:
+                      otid          = candidate.get("otid", "")
+                      title_otter   = candidate.get("title") or "Sans titre"
+                      duration_s    = candidate.get("duration", 0)
+                      summary_text  = candidate.get("summary") or "Pas de résumé disponible."
+                      transcript_url = f"https://otter.ai/u/{otid}"
+                      print(f"Transcript trouvé : '{title_otter}' (otid={otid})", flush=True)
 
           if not candidate:
               print(f"Aucun transcript trouvé pour le {wed_label}.", flush=True)
               # On crée quand même un ticket signalant l'absence
-              summary_text = f"Aucun transcript Otter trouvé pour cette date."
+              summary_text = otter_error or f"Aucun transcript Otter trouvé pour cette date."
               transcript_url = ""
               title_otter = "—"
               duration_s = 0

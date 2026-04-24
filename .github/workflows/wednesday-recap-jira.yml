@@ -1,0 +1,204 @@
+name: Wednesday Recap → Jira
+
+on:
+  # Jeudi 08:30 Paris (CEST=UTC+2 → 06:30 UTC, CET=UTC+1 → 07:30 UTC)
+  # On tire les deux créneaux pour couvrir heure été/hiver
+  schedule:
+    - cron: "30 6 * * 4"   # 08:30 Paris CEST (été)
+    - cron: "30 7 * * 4"   # 08:30 Paris CET (hiver)
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      OTTER_EMAIL: ${{ secrets.OTTER_EMAIL }}
+      OTTER_PASSWORD: ${{ secrets.OTTER_PASSWORD }}
+      JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+      JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+      JIRA_CLOUD_ID: "7a4093dc-37e2-42ce-8c55-97e9dca3a93d"
+      JIRA_PROJECT_KEY: "SCRUM"
+      TZ: Europe/Paris
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install --no-cache-dir requests requests-toolbelt
+
+      - name: Run Otter → Jira sync
+        shell: python
+        run: |
+          import os, sys, json, base64
+          from datetime import datetime, timedelta, timezone
+          from zoneinfo import ZoneInfo
+          import requests
+          from requests_toolbelt.multipart.encoder import MultipartEncoder
+
+          SCRIPT_VERSION = "v1-otter-jira-sync"
+          print(f"=== wednesday-recap-jira {SCRIPT_VERSION} ===", flush=True)
+
+          PARIS = ZoneInfo("Europe/Paris")
+          now = datetime.now(PARIS)
+          event = os.environ.get("GITHUB_EVENT_NAME", "")
+          print(f"event={event} paris_now={now.isoformat(timespec='minutes')}", flush=True)
+
+          def clean(name):
+              v = os.environ.get(name, "") or ""
+              return v.strip().strip('"').strip("'")
+
+          OTTER_EMAIL    = clean("OTTER_EMAIL")
+          OTTER_PASSWORD = clean("OTTER_PASSWORD")
+          JIRA_EMAIL     = clean("JIRA_EMAIL")
+          JIRA_TOKEN     = clean("JIRA_API_TOKEN")
+          CLOUD_ID       = clean("JIRA_CLOUD_ID")
+          PROJECT_KEY    = clean("JIRA_PROJECT_KEY")
+
+          # ── Date du mercredi le plus récent ──────────────────────────────────
+          today = now.date()
+          # weekday(): lundi=0 … mercredi=2 … jeudi=3
+          days_since_wed = (today.weekday() - 2) % 7  # 0 si aujourd'hui est mercredi
+          last_wednesday = today - timedelta(days=days_since_wed)
+          wed_label = last_wednesday.strftime("%d/%m/%Y")
+          ticket_title = f"Recap réunion mercredi {wed_label}"
+          print(f"Cherche transcript du {wed_label}", flush=True)
+
+          # ── Idempotence : ticket Jira déjà créé cette semaine ? ──────────────
+          jira_base = f"https://api.atlassian.com/ex/jira/{CLOUD_ID}/rest/api/3"
+          jira_auth = (JIRA_EMAIL, JIRA_TOKEN)
+
+          def jira_get(path, params=None):
+              r = requests.get(f"{jira_base}{path}", auth=jira_auth, params=params, timeout=20)
+              r.raise_for_status()
+              return r.json()
+
+          def jira_post(path, payload):
+              r = requests.post(
+                  f"{jira_base}{path}",
+                  auth=jira_auth,
+                  json=payload,
+                  headers={"Content-Type": "application/json"},
+                  timeout=20,
+              )
+              r.raise_for_status()
+              return r.json()
+
+          jql = (
+              f'project = {PROJECT_KEY} '
+              f'AND summary ~ "Recap réunion mercredi {wed_label}" '
+              f'ORDER BY created DESC'
+          )
+          existing = jira_get("/search", {"jql": jql, "maxResults": 1})
+          if existing.get("total", 0) > 0 and event == "schedule":
+              key = existing["issues"][0]["key"]
+              print(f"Ticket {key} déjà créé pour {wed_label}, skip.", flush=True)
+              sys.exit(0)
+
+          # ── Otter : login ─────────────────────────────────────────────────────
+          API = "https://otter.ai/forward/api/v1/"
+          session = requests.Session()
+          session.auth = (OTTER_EMAIL, OTTER_PASSWORD)
+
+          r = session.get(API + "login", params={"username": OTTER_EMAIL}, timeout=20)
+          if r.status_code != 200:
+              print(f"Otter login failed: {r.status_code} {r.text[:200]}", file=sys.stderr)
+              sys.exit(1)
+          userid = r.json()["userid"]
+          print(f"Otter login OK (userid={userid})", flush=True)
+
+          # ── Otter : liste des transcripts ─────────────────────────────────────
+          r = session.get(API + "speeches", params={
+              "userid": userid, "folder": 0, "page_size": 50, "source": "owned"
+          }, timeout=20)
+          r.raise_for_status()
+          speeches = r.json().get("data", {}).get("speeches", [])
+
+          # Trouve le transcript du mercredi (created_at = timestamp unix)
+          wed_start = int(datetime(last_wednesday.year, last_wednesday.month, last_wednesday.day,
+                                   tzinfo=PARIS).timestamp())
+          wed_end   = wed_start + 86400
+
+          candidate = None
+          for s in speeches:
+              created = s.get("created_at", 0)
+              if wed_start <= created < wed_end:
+                  candidate = s
+                  break  # le plus récent en premier
+
+          if not candidate:
+              print(f"Aucun transcript trouvé pour le {wed_label}.", flush=True)
+              # On crée quand même un ticket signalant l'absence
+              summary_text = f"Aucun transcript Otter trouvé pour cette date."
+              transcript_url = ""
+              title_otter = "—"
+              duration_s = 0
+          else:
+              otid          = candidate.get("otid", "")
+              title_otter   = candidate.get("title") or "Sans titre"
+              duration_s    = candidate.get("duration", 0)
+              summary_text  = candidate.get("summary") or "Pas de résumé disponible."
+              transcript_url = f"https://otter.ai/u/{otid}"
+              print(f"Transcript trouvé : '{title_otter}' (otid={otid})", flush=True)
+
+          # ── Formatage durée ───────────────────────────────────────────────────
+          def fmt_duration(s):
+              if not s: return "?"
+              m, sec = divmod(s, 60)
+              if m >= 60:
+                  h, m = divmod(m, 60)
+                  return f"{h}h{m:02d}m"
+              return f"{m}m{sec:02d}s"
+
+          # ── Création du ticket Jira ───────────────────────────────────────────
+          # Type "Tâche" = id 10003 dans le projet SCRUM
+          description_lines = [
+              f"**Réunion :** {title_otter}",
+              f"**Date :** {wed_label}",
+              f"**Durée :** {fmt_duration(duration_s)}",
+              "",
+              "---",
+              "",
+              "**Résumé Otter AI :**",
+              "",
+              summary_text,
+          ]
+          if transcript_url:
+              description_lines += ["", f"**Transcript complet :** {transcript_url}"]
+
+          # Jira description en Atlassian Document Format (ADF)
+          adf_content = []
+          for line in description_lines:
+              if line == "---":
+                  adf_content.append({"type": "rule"})
+              elif line == "":
+                  adf_content.append({"type": "paragraph", "content": []})
+              else:
+                  adf_content.append({
+                      "type": "paragraph",
+                      "content": [{"type": "text", "text": line}]
+                  })
+
+          payload = {
+              "fields": {
+                  "project": {"key": PROJECT_KEY},
+                  "summary": ticket_title,
+                  "issuetype": {"id": "10003"},  # Tâche
+                  "description": {
+                      "type": "doc",
+                      "version": 1,
+                      "content": adf_content
+                  }
+              }
+          }
+
+          result = jira_post("/issue", payload)
+          key = result.get("key", "?")
+          url = f"https://threatlab.atlassian.net/browse/{key}"
+          print(f"Ticket créé : {key} → {url}", flush=True)
+          print(f"Titre : {ticket_title}", flush=True)

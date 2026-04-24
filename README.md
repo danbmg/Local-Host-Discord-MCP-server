@@ -1,6 +1,6 @@
-# Local MCP Servers — Discord & Microsoft To Do
+# Local MCP Servers — Discord, Microsoft To Do & Otter.ai
 
-Local [Model Context Protocol](https://modelcontextprotocol.io) servers that expose Discord and Microsoft To Do actions as tools over **stdio transport** — no HTTP server required.
+Local [Model Context Protocol](https://modelcontextprotocol.io) servers that expose Discord, Microsoft To Do and Otter.ai actions as tools over **stdio transport** — no HTTP server required.
 
 ---
 
@@ -13,7 +13,9 @@ Claude (Desktop / Code)
     │
     ├─► mcp_discord/server.py  ──►  Bot "Claude_MCP"  ──►  Discord
     │
-    └─► mcp_todo/server.py     ──►  Microsoft Graph API  ──►  Microsoft To Do
+    ├─► mcp_todo/server.py     ──►  Microsoft Graph API  ──►  Microsoft To Do
+    │
+    └─► mcp-otter/run_otter.py ──►  Otter.ai API  ──►  Meeting transcripts
 ```
 
 No network port is opened. Each server lives only as long as its parent Claude session.
@@ -143,6 +145,57 @@ cd mcp_todo
 
 ---
 
+## mcp-otter — Otter.ai transcript tools
+
+Third-party MCP server by [Darren Zal](https://github.com/DarrenZal/otter-mcp) (MIT License), vendored in [mcp-otter/](mcp-otter/) and wrapped with a local `.env` loader ([run_otter.py](mcp-otter/run_otter.py)) to match the credentials pattern used by the other two servers.
+
+### Tools
+
+| Tool | Description |
+|---|---|
+| `otter_search` | Full-text search across all your Otter transcripts |
+| `otter_list_transcripts` | List recent transcripts with summaries |
+| `otter_get_transcript` | Fetch the full text of a specific transcript (with speaker labels) |
+| `otter_get_user` | Get info about the authenticated Otter.ai account |
+
+### Requirements
+
+- Python 3.11+
+- An **Otter.ai account** (email + password)
+
+### Setup
+
+**1. Create a virtual environment and install**
+
+```bat
+cd mcp-otter
+
+set PY=C:\Users\%USERNAME%\AppData\Roaming\uv\python\cpython-3.14.3-windows-x86_64-none\python.exe
+%PY% -m venv .venv
+
+.venv\Scripts\activate
+pip install -e .
+pip install python-dotenv
+```
+
+**2. Configure credentials** — create `mcp-otter/.env`:
+
+```env
+OTTER_EMAIL=your@email.com
+OTTER_PASSWORD=your-otter-password
+```
+
+**3. Smoke test**
+
+```bat
+cd mcp-otter
+.venv\Scripts\python.exe run_otter.py
+```
+
+For more detail on the underlying server (available tools, example queries, how the `advanced_search` API works) see [mcp-otter/README.md](mcp-otter/README.md).
+
+---
+
 ## Connecting to Claude Desktop
 
 Open the config file:
@@ -162,6 +215,10 @@ Open the config file:
     "todo": {
       "command": "C:\\delivery\\Local-Host-Discord-MCP-server\\mcp_todo\\.venv\\Scripts\\python.exe",
       "args": ["C:\\delivery\\Local-Host-Discord-MCP-server\\mcp_todo\\server.py"]
+    },
+    "otter": {
+      "command": "C:\\delivery\\Local-Host-Discord-MCP-server\\mcp-otter\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\delivery\\Local-Host-Discord-MCP-server\\mcp-otter\\run_otter.py"]
     }
   }
 }
@@ -181,6 +238,10 @@ claude mcp add discord \
 claude mcp add todo \
   --command "C:/delivery/Local-Host-Discord-MCP-server/mcp_todo/.venv/Scripts/python.exe" \
   --args "C:/delivery/Local-Host-Discord-MCP-server/mcp_todo/server.py"
+
+claude mcp add otter \
+  --command "C:/delivery/Local-Host-Discord-MCP-server/mcp-otter/.venv/Scripts/python.exe" \
+  --args "C:/delivery/Local-Host-Discord-MCP-server/mcp-otter/run_otter.py"
 ```
 
 ---
@@ -195,13 +256,20 @@ Local-Host-Discord-MCP-server/
 │   ├── .env               # DISCORD_TOKEN, DISCORD_GUILD_ID  (not committed)
 │   └── requirements.txt
 │
-└── mcp_todo/
-    ├── server.py          # MCP server — To Do tool definitions and handlers
-    ├── todo_client.py     # Microsoft Graph API async wrapper
-    ├── auth.py            # MSAL device-flow + token cache management
-    ├── .env               # CLIENT_ID, CLIENT_SECRET, TENANT_ID  (not committed)
-    ├── token_cache.json   # Generated on first auth run  (not committed)
-    └── requirements.txt
+├── mcp_todo/
+│   ├── server.py          # MCP server — To Do tool definitions and handlers
+│   ├── todo_client.py     # Microsoft Graph API async wrapper
+│   ├── auth.py            # MSAL device-flow + token cache management
+│   ├── .env               # CLIENT_ID, CLIENT_SECRET, TENANT_ID  (not committed)
+│   ├── token_cache.json   # Generated on first auth run  (not committed)
+│   └── requirements.txt
+│
+└── mcp-otter/             # Vendored from https://github.com/DarrenZal/otter-mcp (MIT)
+    ├── run_otter.py       # Local .env-loading wrapper around otter_mcp.main()
+    ├── src/otter_mcp/     # Upstream server (search + transcript retrieval)
+    ├── .env               # OTTER_EMAIL, OTTER_PASSWORD  (not committed)
+    ├── pyproject.toml
+    └── LICENSE            # MIT — Copyright (c) 2025 Darren Zal
 ```
 
 ---
@@ -218,3 +286,11 @@ Local-Host-Discord-MCP-server/
 | `AADSTS` error during device flow | Verify the Azure app has `Tasks.ReadWrite` delegated permission and the correct redirect URI |
 | `ModuleNotFoundError` | Run `pip install -r requirements.txt` inside the correct `.venv` |
 | Server exits immediately | Make sure the venv `python.exe` path in the config is correct |
+| `OTTER_EMAIL is not set` | Fill in `mcp-otter/.env` |
+| Otter login fails | Check that the email/password work on otter.ai directly; the API is unofficial and may rate-limit |
+
+---
+
+## Credits
+
+- [`mcp-otter/`](mcp-otter/) — vendored copy of [DarrenZal/otter-mcp](https://github.com/DarrenZal/otter-mcp) by Darren Zal, distributed under the MIT License. See [mcp-otter/LICENSE](mcp-otter/LICENSE).

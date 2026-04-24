@@ -15,6 +15,7 @@ jobs:
     env:
       OTTER_EMAIL: ${{ secrets.OTTER_EMAIL }}
       OTTER_PASSWORD: ${{ secrets.OTTER_PASSWORD }}
+      OTTER_API_KEY: ${{ secrets.OTTER_API_KEY }}
       JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
       JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
       JIRA_CLOUD_ID: "7a4093dc-37e2-42ce-8c55-97e9dca3a93d"
@@ -41,7 +42,7 @@ jobs:
           import requests
           from requests_toolbelt.multipart.encoder import MultipartEncoder
 
-          SCRIPT_VERSION = "v2-jira-search-jql"
+          SCRIPT_VERSION = "v3-otter-public-api"
           print(f"=== wednesday-recap-jira {SCRIPT_VERSION} ===", flush=True)
 
           PARIS = ZoneInfo("Europe/Paris")
@@ -55,6 +56,7 @@ jobs:
 
           OTTER_EMAIL    = clean("OTTER_EMAIL")
           OTTER_PASSWORD = clean("OTTER_PASSWORD")
+          OTTER_API_KEY  = clean("OTTER_API_KEY")
           JIRA_EMAIL     = clean("JIRA_EMAIL")
           JIRA_TOKEN     = clean("JIRA_API_TOKEN")
           CLOUD_ID       = clean("JIRA_CLOUD_ID")
@@ -105,36 +107,102 @@ jobs:
               print(f"Ticket {key} déjà créé pour {wed_label}, skip.", flush=True)
               sys.exit(0)
 
-          # ── Otter : login ─────────────────────────────────────────────────────
-          API = "https://otter.ai/forward/api/v1/"
-          session = requests.Session()
-          session.auth = (OTTER_EMAIL, OTTER_PASSWORD)
-
-          r = session.get(API + "login", params={"username": OTTER_EMAIL}, timeout=20)
-          if r.status_code != 200:
-              print(f"Otter login failed: {r.status_code} {r.text[:200]}", file=sys.stderr)
-              sys.exit(1)
-          userid = r.json()["userid"]
-          print(f"Otter login OK (userid={userid})", flush=True)
-
-          # ── Otter : liste des transcripts ─────────────────────────────────────
-          r = session.get(API + "speeches", params={
-              "userid": userid, "folder": 0, "page_size": 50, "source": "owned"
-          }, timeout=20)
-          r.raise_for_status()
-          speeches = r.json().get("data", {}).get("speeches", [])
-
           # Trouve le transcript du mercredi (created_at = timestamp unix)
           wed_start = int(datetime(last_wednesday.year, last_wednesday.month, last_wednesday.day,
                                    tzinfo=PARIS).timestamp())
           wed_end   = wed_start + 86400
 
           candidate = None
-          for s in speeches:
-              created = s.get("created_at", 0)
-              if wed_start <= created < wed_end:
-                  candidate = s
-                  break  # le plus récent en premier
+          summary_text = ""
+          transcript_url = ""
+          title_otter = "—"
+          duration_s = 0
+
+          if OTTER_API_KEY:
+              print("Otter public API: utilisation de OTTER_API_KEY", flush=True)
+              otter_base = "https://api.otter.ai/v1"
+              otter_headers = {"Authorization": f"Bearer {OTTER_API_KEY}"}
+
+              r = requests.get(
+                  f"{otter_base}/conversations",
+                  headers=otter_headers,
+                  params={"include_shared": "false", "limit": 100},
+                  timeout=20,
+              )
+              if r.status_code != 200:
+                  print(f"Otter public API failed: {r.status_code} {r.text[:200]}", file=sys.stderr)
+                  sys.exit(1)
+
+              conversations = r.json().get("data", [])
+              for c in conversations:
+                  created_raw = c.get("created_at", "")
+                  if not created_raw:
+                      continue
+                  created_dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00")).astimezone(PARIS)
+                  created = int(created_dt.timestamp())
+                  if wed_start <= created < wed_end:
+                      candidate = c
+                      break  # le plus récent en premier
+
+              if candidate:
+                  conversation_id = candidate.get("id", "")
+                  detail = {}
+                  if conversation_id:
+                      r = requests.get(
+                          f"{otter_base}/conversations/{conversation_id}",
+                          headers=otter_headers,
+                          params={"include": "all"},
+                          timeout=20,
+                      )
+                      if r.status_code == 200:
+                          detail = r.json().get("data", {})
+
+                  title_otter = detail.get("title") or candidate.get("title") or "Sans titre"
+                  summary_text = (
+                      detail.get("abstract_summary")
+                      or candidate.get("abstract_summary")
+                      or "Pas de résumé disponible."
+                  )
+                  transcript_url = detail.get("url") or candidate.get("url") or ""
+                  print(f"Transcript trouvé : '{title_otter}'", flush=True)
+          else:
+              # ── Otter : login legacy non officiel ─────────────────────────────
+              API = "https://otter.ai/forward/api/v1/"
+              session = requests.Session()
+              session.auth = (OTTER_EMAIL, OTTER_PASSWORD)
+
+              r = session.get(API + "login", params={"username": OTTER_EMAIL}, timeout=20)
+              if r.status_code != 200:
+                  print(
+                      "Otter legacy login failed: "
+                      f"{r.status_code} {r.text[:200]}. "
+                      "Crée un secret OTTER_API_KEY pour utiliser l'API publique Otter.",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+              userid = r.json()["userid"]
+              print(f"Otter login OK (userid={userid})", flush=True)
+
+              # ── Otter : liste des transcripts legacy ─────────────────────────
+              r = session.get(API + "speeches", params={
+                  "userid": userid, "folder": 0, "page_size": 50, "source": "owned"
+              }, timeout=20)
+              r.raise_for_status()
+              speeches = r.json().get("data", {}).get("speeches", [])
+
+              for s in speeches:
+                  created = s.get("created_at", 0)
+                  if wed_start <= created < wed_end:
+                      candidate = s
+                      break  # le plus récent en premier
+
+              if candidate:
+                  otid          = candidate.get("otid", "")
+                  title_otter   = candidate.get("title") or "Sans titre"
+                  duration_s    = candidate.get("duration", 0)
+                  summary_text  = candidate.get("summary") or "Pas de résumé disponible."
+                  transcript_url = f"https://otter.ai/u/{otid}"
+                  print(f"Transcript trouvé : '{title_otter}' (otid={otid})", flush=True)
 
           if not candidate:
               print(f"Aucun transcript trouvé pour le {wed_label}.", flush=True)
@@ -143,13 +211,6 @@ jobs:
               transcript_url = ""
               title_otter = "—"
               duration_s = 0
-          else:
-              otid          = candidate.get("otid", "")
-              title_otter   = candidate.get("title") or "Sans titre"
-              duration_s    = candidate.get("duration", 0)
-              summary_text  = candidate.get("summary") or "Pas de résumé disponible."
-              transcript_url = f"https://otter.ai/u/{otid}"
-              print(f"Transcript trouvé : '{title_otter}' (otid={otid})", flush=True)
 
           # ── Formatage durée ───────────────────────────────────────────────────
           def fmt_duration(s):

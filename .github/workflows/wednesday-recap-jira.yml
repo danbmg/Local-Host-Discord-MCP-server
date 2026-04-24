@@ -41,7 +41,7 @@ jobs:
           import requests
           from requests_toolbelt.multipart.encoder import MultipartEncoder
 
-          SCRIPT_VERSION = "v1-otter-jira-sync"
+          SCRIPT_VERSION = "v2-jira-search-jql"
           print(f"=== wednesday-recap-jira {SCRIPT_VERSION} ===", flush=True)
 
           PARIS = ZoneInfo("Europe/Paris")
@@ -94,9 +94,14 @@ jobs:
               f'AND summary ~ "Recap réunion mercredi {wed_label}" '
               f'ORDER BY created DESC'
           )
-          existing = jira_get("/search", {"jql": jql, "maxResults": 1})
-          if existing.get("total", 0) > 0 and event == "schedule":
-              key = existing["issues"][0]["key"]
+          existing = jira_get("/search/jql", {
+              "jql": jql,
+              "maxResults": 1,
+              "fields": "key",
+          })
+          existing_issues = existing.get("issues", [])
+          if existing_issues and event == "schedule":
+              key = existing_issues[0]["key"]
               print(f"Ticket {key} déjà créé pour {wed_label}, skip.", flush=True)
               sys.exit(0)
 
